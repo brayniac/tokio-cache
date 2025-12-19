@@ -116,6 +116,14 @@ pub struct CacheConfig {
     /// - power 26 = 64M buckets
     #[serde(default = "default_hashtable_power")]
     pub hashtable_power: u8,
+
+    /// Hugepage size preference for heap allocation (Linux only)
+    /// Supported values: "none", "2mb", "1gb"
+    /// - "none" (default): Use regular 4KB pages
+    /// - "2mb": Try 2MB hugepages, fall back to regular if unavailable
+    /// - "1gb": Try 1GB hugepages, fall back to regular if unavailable
+    #[serde(default = "default_hugepage_size")]
+    pub hugepage_size: String,
 }
 
 impl Default for CacheConfig {
@@ -124,6 +132,7 @@ impl Default for CacheConfig {
             heap_size: default_heap_size(),
             segment_size: default_segment_size(),
             hashtable_power: default_hashtable_power(),
+            hugepage_size: default_hugepage_size(),
         }
     }
 }
@@ -138,6 +147,36 @@ fn default_segment_size() -> usize {
 
 fn default_hashtable_power() -> u8 {
     26
+}
+
+fn default_hugepage_size() -> String {
+    "none".to_string()
+}
+
+/// Parse hugepage size string into the appropriate enum for async-s3fifo
+pub fn parse_hugepage_size_s3fifo(s: &str) -> Result<async_s3fifo::HugepageSize, String> {
+    match s.to_lowercase().as_str() {
+        "none" | "" => Ok(async_s3fifo::HugepageSize::None),
+        "2mb" | "2m" => Ok(async_s3fifo::HugepageSize::TwoMegabyte),
+        "1gb" | "1g" => Ok(async_s3fifo::HugepageSize::OneGigabyte),
+        _ => Err(format!(
+            "Invalid hugepage_size '{}'. Valid values: none, 2mb, 1gb",
+            s
+        )),
+    }
+}
+
+/// Parse hugepage size string into the appropriate enum for async-segcache
+pub fn parse_hugepage_size_segcache(s: &str) -> Result<async_segcache::HugepageSize, String> {
+    match s.to_lowercase().as_str() {
+        "none" | "" => Ok(async_segcache::HugepageSize::None),
+        "2mb" | "2m" => Ok(async_segcache::HugepageSize::TwoMegabyte),
+        "1gb" | "1g" => Ok(async_segcache::HugepageSize::OneGigabyte),
+        _ => Err(format!(
+            "Invalid hugepage_size '{}'. Valid values: none, 2mb, 1gb",
+            s
+        )),
+    }
 }
 
 /// Deserialize a size string like "64MB" or "4GB" into bytes
@@ -391,6 +430,14 @@ segment_size = "1MB"
 #   power 26 = 64M buckets
 #
 hashtable_power = 26
+
+# Hugepage size for heap allocation (Linux only)
+# Supported values: "none", "2mb", "1gb"
+# - "none" (default): Use regular 4KB pages
+# - "2mb": Try 2MB hugepages (requires 2MB hugepages configured on system)
+# - "1gb": Try 1GB hugepages (requires 1GB hugepages configured on system)
+# Falls back to regular pages if hugepages are unavailable.
+# hugepage_size = "2mb"
 "#
     );
     print!("{}", config);

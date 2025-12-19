@@ -5,12 +5,17 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+#[cfg(not(target_env = "msvc"))]
+#[allow(non_upper_case_globals)]
+#[unsafe(export_name = "_rjem_malloc_conf")]
+pub static _rjem_malloc_conf: &[u8] = b"thp:always,metadata_thp:always\0";
+
 use async_s3fifo::{Cache as S3fifo, CacheBuilder, ItemGuard};
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_cache::config::{print_default_config, Config};
+use tokio_cache::config::{print_default_config, parse_hugepage_size_s3fifo, Config};
 use tokio_cache::metrics;
 use tokio_cache::{Cache, CacheError, CacheGuard};
 
@@ -155,10 +160,14 @@ async fn async_main(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         let _ = metrics::serve(&metrics_addr).await;
     });
 
+    let hugepage_size = parse_hugepage_size_s3fifo(&config.cache.hugepage_size)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+
     let cache = CacheBuilder::new()
         .ram_size(config.cache.heap_size)
         .ram_segment_size(config.cache.segment_size)
         .hashtable_power(config.cache.hashtable_power)
+        .hugepage_size(hugepage_size)
         .build()?;
 
     let wrapper = S3fifoWrapper(cache);
