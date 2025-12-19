@@ -68,7 +68,7 @@ dependencies = [
 [[package]]
 name = "async-s3fifo"
 version = "0.1.0"
-source = "git+https://github.com/brayniac/async-s3fifo#8a62e260cb4cf0fc04b10b9688005ecb9aec7cf7"
+source = "git+https://github.com/brayniac/async-s3fifo#cfa0af74a974f39ada62cbce99b1d8dd58f1f361"
 dependencies = [
  "ahash",
  "clocksource",
@@ -83,7 +83,7 @@ dependencies = [
 [[package]]
 name = "async-segcache"
 version = "0.1.0"
-source = "git+https://github.com/brayniac/async-segcache#8fc3896ef52ea9fff1f15498756ceb6bc9cba8ab"
+source = "git+https://github.com/brayniac/async-segcache#e570261eb68e5480a1b2f3b60ec146c9890aa257"
 dependencies = [
  "ahash",
  "clocksource",

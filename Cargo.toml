@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 async-segcache = { git = "https://github.com/brayniac/async-segcache" }
 async-s3fifo = { git = "https://github.com/brayniac/async-s3fifo" }
+#async-segcache = { path = "../async-segcache" }
+#async-s3fifo = { path = "../async-s3fifo" }
 tokio = { version = "1", features = ["full"] }
 bytes = "1.10"
 clocksource = "0.8"

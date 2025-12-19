@@ -124,11 +124,9 @@ async fn handle_redis_client_inner<C: Cache>(
             Ok(0) => return Ok(()),
             Ok(_n) => {}
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Only wait if we need more data and have nothing to process
-                if buffer.is_empty() {
-                    socket.ready(Interest::READABLE).await?;
-                    continue;
-                }
+                // No data available right now - wait for more
+                socket.ready(Interest::READABLE).await?;
+                continue;
             }
             Err(e) => return Err(e.into()),
         }
@@ -205,10 +203,9 @@ async fn handle_memcached_client_inner<C: Cache>(
             Ok(0) => return Ok(()),
             Ok(_n) => {}
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                if buffer.is_empty() {
-                    socket.ready(Interest::READABLE).await?;
-                    continue;
-                }
+                // No data available right now - wait for more
+                socket.ready(Interest::READABLE).await?;
+                continue;
             }
             Err(e) => return Err(e.into()),
         }
