@@ -116,46 +116,54 @@ async fn handle_redis_client_inner<C: Cache>(
     let _ = sock_ref.set_send_buffer_size(send_buffer_size);
 
     let mut buffer = BytesMut::with_capacity(buffer_size);
-    let mut write_buf = BytesMut::with_capacity(256);
+    let mut write_buf = BytesMut::with_capacity(4096);
 
     loop {
-        socket.ready(Interest::READABLE).await?;
-
+        // Try to read without waiting first
         match socket.try_read_buf(&mut buffer) {
             Ok(0) => return Ok(()),
-            Ok(_n) => {
-                loop {
-                    if buffer.is_empty() {
-                        break;
-                    }
-
-                    match RedisCommand::parse_from_buffer(&buffer) {
-                        Ok((cmd, consumed)) => {
-                            write_buf.clear();
-                            cmd.execute(&*cache, &mut write_buf).await;
-                            buffer.advance(consumed);
-
-                            if !write_buf.is_empty() {
-                                write_all(&socket, &write_buf).await?;
-                            }
-                        }
-                        Err(RedisParseError::Incomplete) => break,
-                        Err(RedisParseError::Invalid(msg)) => {
-                            PROTOCOL_ERRORS.increment();
-                            let error_msg = if msg.contains("Expected array") {
-                                b"-ERR Protocol error: expected Redis RESP protocol\r\n".to_vec()
-                            } else {
-                                format!("-ERR {}\r\n", msg).into_bytes()
-                            };
-                            let _ = write_all(&socket, &error_msg).await;
-                            buffer.clear();
-                            break;
-                        }
-                    }
+            Ok(_n) => {}
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Only wait if we need more data and have nothing to process
+                if buffer.is_empty() {
+                    socket.ready(Interest::READABLE).await?;
+                    continue;
                 }
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
             Err(e) => return Err(e.into()),
+        }
+
+        // Process all complete commands, batching responses
+        write_buf.clear();
+        loop {
+            if buffer.is_empty() {
+                break;
+            }
+
+            match RedisCommand::parse_from_buffer(&buffer) {
+                Ok((cmd, consumed)) => {
+                    cmd.execute(&*cache, &mut write_buf).await;
+                    buffer.advance(consumed);
+                }
+                Err(RedisParseError::Incomplete) => break,
+                Err(RedisParseError::Invalid(msg)) => {
+                    PROTOCOL_ERRORS.increment();
+                    if msg.contains("Expected array") {
+                        write_buf.extend_from_slice(b"-ERR Protocol error: expected Redis RESP protocol\r\n");
+                    } else {
+                        write_buf.extend_from_slice(b"-ERR ");
+                        write_buf.extend_from_slice(msg.as_bytes());
+                        write_buf.extend_from_slice(b"\r\n");
+                    }
+                    buffer.clear();
+                    break;
+                }
+            }
+        }
+
+        // Write all responses in one syscall
+        if !write_buf.is_empty() {
+            write_all(&socket, &write_buf).await?;
         }
     }
 }
@@ -189,46 +197,58 @@ async fn handle_memcached_client_inner<C: Cache>(
     let _ = sock_ref.set_send_buffer_size(send_buffer_size);
 
     let mut buffer = BytesMut::with_capacity(buffer_size);
-    let mut write_buf = BytesMut::with_capacity(256);
+    let mut write_buf = BytesMut::with_capacity(4096);
 
     loop {
-        socket.ready(Interest::READABLE).await?;
-
+        // Try to read without waiting first
         match socket.try_read_buf(&mut buffer) {
             Ok(0) => return Ok(()),
-            Ok(_n) => {
-                loop {
-                    if buffer.is_empty() {
-                        break;
-                    }
-
-                    match MemcachedCommand::parse(&buffer) {
-                        Ok((cmd, consumed)) => {
-                            write_buf.clear();
-                            let should_quit = cmd.execute(&*cache, &mut write_buf).await;
-                            buffer.advance(consumed);
-
-                            if !write_buf.is_empty() {
-                                write_all(&socket, &write_buf).await?;
-                            }
-
-                            if should_quit {
-                                return Ok(());
-                            }
-                        }
-                        Err(MemcachedParseError::Incomplete) => break,
-                        Err(MemcachedParseError::Invalid(msg)) => {
-                            PROTOCOL_ERRORS.increment();
-                            let error_msg = format!("ERROR {}\r\n", msg);
-                            let _ = write_all(&socket, error_msg.as_bytes()).await;
-                            buffer.clear();
-                            break;
-                        }
-                    }
+            Ok(_n) => {}
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if buffer.is_empty() {
+                    socket.ready(Interest::READABLE).await?;
+                    continue;
                 }
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
             Err(e) => return Err(e.into()),
+        }
+
+        // Process all complete commands, batching responses
+        write_buf.clear();
+        let mut should_quit = false;
+
+        loop {
+            if buffer.is_empty() {
+                break;
+            }
+
+            match MemcachedCommand::parse(&buffer) {
+                Ok((cmd, consumed)) => {
+                    should_quit = cmd.execute(&*cache, &mut write_buf).await;
+                    buffer.advance(consumed);
+                    if should_quit {
+                        break;
+                    }
+                }
+                Err(MemcachedParseError::Incomplete) => break,
+                Err(MemcachedParseError::Invalid(msg)) => {
+                    PROTOCOL_ERRORS.increment();
+                    write_buf.extend_from_slice(b"ERROR ");
+                    write_buf.extend_from_slice(msg.as_bytes());
+                    write_buf.extend_from_slice(b"\r\n");
+                    buffer.clear();
+                    break;
+                }
+            }
+        }
+
+        // Write all responses in one syscall
+        if !write_buf.is_empty() {
+            write_all(&socket, &write_buf).await?;
+        }
+
+        if should_quit {
+            return Ok(());
         }
     }
 }
