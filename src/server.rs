@@ -115,24 +115,41 @@ async fn handle_redis_client_inner<C: Cache>(
     let _ = sock_ref.set_recv_buffer_size(recv_buffer_size);
     let _ = sock_ref.set_send_buffer_size(send_buffer_size);
 
+    // Enable kernel busy-polling for lower latency (Linux only)
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = socket.as_raw_fd();
+        let busy_poll_us: libc::c_int = 50; // 50 microseconds
+        unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_BUSY_POLL,
+                &busy_poll_us as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+    }
+
     let mut buffer = BytesMut::with_capacity(buffer_size);
     let mut write_buf = BytesMut::with_capacity(4096);
 
     loop {
-        // Try to read without waiting first
-        match socket.try_read_buf(&mut buffer) {
-            Ok(0) => return Ok(()),
-            Ok(_n) => {}
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No data available right now - wait for more
-                socket.ready(Interest::READABLE).await?;
-                continue;
+        // Drain socket: read as much as possible before processing
+        loop {
+            match socket.try_read_buf(&mut buffer) {
+                Ok(0) => return Ok(()), // EOF
+                Ok(_) => continue,      // Got data, try to read more
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(e.into()),
             }
-            Err(e) => return Err(e.into()),
         }
 
         // Process all complete commands, batching responses
         write_buf.clear();
+        let mut made_progress = false;
+
         loop {
             if buffer.is_empty() {
                 break;
@@ -142,6 +159,7 @@ async fn handle_redis_client_inner<C: Cache>(
                 Ok((cmd, consumed)) => {
                     cmd.execute(&*cache, &mut write_buf).await;
                     buffer.advance(consumed);
+                    made_progress = true;
                 }
                 Err(RedisParseError::Incomplete) => break,
                 Err(RedisParseError::Invalid(msg)) => {
@@ -162,6 +180,11 @@ async fn handle_redis_client_inner<C: Cache>(
         // Write all responses in one syscall
         if !write_buf.is_empty() {
             write_all(&socket, &write_buf).await?;
+        }
+
+        // Only park if we made no progress (need more data for incomplete command)
+        if !made_progress {
+            socket.ready(Interest::READABLE).await?;
         }
     }
 }
@@ -194,25 +217,41 @@ async fn handle_memcached_client_inner<C: Cache>(
     let _ = sock_ref.set_recv_buffer_size(recv_buffer_size);
     let _ = sock_ref.set_send_buffer_size(send_buffer_size);
 
+    // Enable kernel busy-polling for lower latency (Linux only)
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = socket.as_raw_fd();
+        let busy_poll_us: libc::c_int = 50; // 50 microseconds
+        unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_BUSY_POLL,
+                &busy_poll_us as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+    }
+
     let mut buffer = BytesMut::with_capacity(buffer_size);
     let mut write_buf = BytesMut::with_capacity(4096);
 
     loop {
-        // Try to read without waiting first
-        match socket.try_read_buf(&mut buffer) {
-            Ok(0) => return Ok(()),
-            Ok(_n) => {}
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No data available right now - wait for more
-                socket.ready(Interest::READABLE).await?;
-                continue;
+        // Drain socket: read as much as possible before processing
+        loop {
+            match socket.try_read_buf(&mut buffer) {
+                Ok(0) => return Ok(()), // EOF
+                Ok(_) => continue,      // Got data, try to read more
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(e.into()),
             }
-            Err(e) => return Err(e.into()),
         }
 
         // Process all complete commands, batching responses
         write_buf.clear();
         let mut should_quit = false;
+        let mut made_progress = false;
 
         loop {
             if buffer.is_empty() {
@@ -223,6 +262,7 @@ async fn handle_memcached_client_inner<C: Cache>(
                 Ok((cmd, consumed)) => {
                     should_quit = cmd.execute(&*cache, &mut write_buf).await;
                     buffer.advance(consumed);
+                    made_progress = true;
                     if should_quit {
                         break;
                     }
@@ -246,6 +286,11 @@ async fn handle_memcached_client_inner<C: Cache>(
 
         if should_quit {
             return Ok(());
+        }
+
+        // Only park if we made no progress (need more data for incomplete command)
+        if !made_progress {
+            socket.ready(Interest::READABLE).await?;
         }
     }
 }
