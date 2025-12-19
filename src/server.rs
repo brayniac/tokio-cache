@@ -1,6 +1,7 @@
 use crate::cache::Cache;
-use crate::commands::{Command, ParseError};
+use crate::commands::{Command as RedisCommand, ParseError as RedisParseError};
 use crate::config::Config;
+use crate::memcached::{Command as MemcachedCommand, ParseError as MemcachedParseError};
 use crate::metrics::{CONNECTIONS_ACCEPTED, CONNECTIONS_ACTIVE, PROTOCOL_ERRORS};
 use bytes::{Buf, BytesMut};
 use std::sync::Arc;
@@ -12,21 +13,54 @@ use tokio::net::{TcpListener, TcpStream};
 /// This function is generic over the cache type to allow for different cache
 /// backends while ensuring static dispatch (monomorphization).
 pub async fn run<C: Cache>(config: Config, cache: C) -> Result<(), Box<dyn std::error::Error>> {
-    let addr = &config.server.listen;
     let cache = Arc::new(cache);
 
-    // Create listener with optimized settings
-    let listener = create_listener(addr, &config)?;
+    // Create Redis listener
+    let redis_listener = create_listener(&config.server.listen, &config)?;
 
-    // Accept loop
+    // Create Memcached listener if enabled
+    let memcached_listener = if !config.server.memcached_listen.is_empty() {
+        Some(create_listener(&config.server.memcached_listen, &config)?)
+    } else {
+        None
+    };
+
+    // Spawn Memcached accept loop if enabled
+    if let Some(listener) = memcached_listener {
+        let cache = cache.clone();
+        let read_buffer_size = config.server.read_buffer_size;
+        let recv_buffer_size = config.server.recv_buffer_size;
+        let send_buffer_size = config.server.send_buffer_size;
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok((socket, _addr)) = listener.accept().await {
+                    let cache = cache.clone();
+
+                    CONNECTIONS_ACCEPTED.increment();
+                    CONNECTIONS_ACTIVE.increment();
+
+                    tokio::spawn(handle_memcached_client(
+                        socket,
+                        cache,
+                        read_buffer_size,
+                        recv_buffer_size,
+                        send_buffer_size,
+                    ));
+                }
+            }
+        });
+    }
+
+    // Redis accept loop (main loop)
     loop {
-        let (socket, _addr) = listener.accept().await?;
+        let (socket, _addr) = redis_listener.accept().await?;
         let cache = cache.clone();
 
         CONNECTIONS_ACCEPTED.increment();
         CONNECTIONS_ACTIVE.increment();
 
-        tokio::spawn(handle_client(
+        tokio::spawn(handle_redis_client(
             socket,
             cache,
             config.server.read_buffer_size,
@@ -53,18 +87,22 @@ fn create_listener(addr: &str, config: &Config) -> Result<TcpListener, Box<dyn s
     Ok(TcpListener::from_std(StdListener::from(socket))?)
 }
 
-async fn handle_client<C: Cache>(
+// =============================================================================
+// Redis Protocol Handler
+// =============================================================================
+
+async fn handle_redis_client<C: Cache>(
     socket: TcpStream,
     cache: Arc<C>,
     buffer_size: usize,
     recv_buffer_size: usize,
     send_buffer_size: usize,
 ) {
-    let _ = handle_client_inner(socket, cache, buffer_size, recv_buffer_size, send_buffer_size).await;
+    let _ = handle_redis_client_inner(socket, cache, buffer_size, recv_buffer_size, send_buffer_size).await;
     CONNECTIONS_ACTIVE.decrement();
 }
 
-async fn handle_client_inner<C: Cache>(
+async fn handle_redis_client_inner<C: Cache>(
     socket: TcpStream,
     cache: Arc<C>,
     buffer_size: usize,
@@ -73,7 +111,6 @@ async fn handle_client_inner<C: Cache>(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     socket.set_nodelay(true)?;
 
-    // Configure socket buffers
     let sock_ref = socket2::SockRef::from(&socket);
     let _ = sock_ref.set_recv_buffer_size(recv_buffer_size);
     let _ = sock_ref.set_send_buffer_size(send_buffer_size);
@@ -82,70 +119,134 @@ async fn handle_client_inner<C: Cache>(
     let mut write_buf = BytesMut::with_capacity(256);
 
     loop {
-        // Wait for socket to be readable
         socket.ready(Interest::READABLE).await?;
 
-        // Try to read data without blocking
         match socket.try_read_buf(&mut buffer) {
-            Ok(0) => {
-                // Connection closed
-                return Ok(());
-            }
+            Ok(0) => return Ok(()),
             Ok(_n) => {
-                // Process all complete commands in buffer
                 loop {
                     if buffer.is_empty() {
                         break;
                     }
 
-                    match Command::parse_from_buffer(&buffer) {
+                    match RedisCommand::parse_from_buffer(&buffer) {
                         Ok((cmd, consumed)) => {
                             write_buf.clear();
                             cmd.execute(&*cache, &mut write_buf).await;
                             buffer.advance(consumed);
 
-                            // Write response
                             if !write_buf.is_empty() {
-                                // Try non-blocking write first
-                                let mut written = 0;
-                                while written < write_buf.len() {
-                                    match socket.try_write(&write_buf[written..]) {
-                                        Ok(n) => written += n,
-                                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                            // Wait for socket to be writable
-                                            socket.ready(Interest::WRITABLE).await?;
-                                        }
-                                        Err(e) => return Err(e.into()),
-                                    }
-                                }
+                                write_all(&socket, &write_buf).await?;
                             }
                         }
-                        Err(ParseError::Incomplete) => {
-                            // Need more data
-                            break;
-                        }
-                        Err(ParseError::Invalid(msg)) => {
+                        Err(RedisParseError::Incomplete) => break,
+                        Err(RedisParseError::Invalid(msg)) => {
                             PROTOCOL_ERRORS.increment();
                             let error_msg = if msg.contains("Expected array") {
                                 b"-ERR Protocol error: expected Redis RESP protocol\r\n".to_vec()
                             } else {
                                 format!("-ERR {}\r\n", msg).into_bytes()
                             };
-                            socket.writable().await?;
-                            let _ = socket.try_write(&error_msg);
+                            let _ = write_all(&socket, &error_msg).await;
                             buffer.clear();
                             break;
                         }
                     }
                 }
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No data available, continue waiting
-                continue;
-            }
-            Err(e) => {
-                return Err(e.into());
-            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(e) => return Err(e.into()),
         }
     }
+}
+
+// =============================================================================
+// Memcached Protocol Handler
+// =============================================================================
+
+async fn handle_memcached_client<C: Cache>(
+    socket: TcpStream,
+    cache: Arc<C>,
+    buffer_size: usize,
+    recv_buffer_size: usize,
+    send_buffer_size: usize,
+) {
+    let _ = handle_memcached_client_inner(socket, cache, buffer_size, recv_buffer_size, send_buffer_size).await;
+    CONNECTIONS_ACTIVE.decrement();
+}
+
+async fn handle_memcached_client_inner<C: Cache>(
+    socket: TcpStream,
+    cache: Arc<C>,
+    buffer_size: usize,
+    recv_buffer_size: usize,
+    send_buffer_size: usize,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    socket.set_nodelay(true)?;
+
+    let sock_ref = socket2::SockRef::from(&socket);
+    let _ = sock_ref.set_recv_buffer_size(recv_buffer_size);
+    let _ = sock_ref.set_send_buffer_size(send_buffer_size);
+
+    let mut buffer = BytesMut::with_capacity(buffer_size);
+    let mut write_buf = BytesMut::with_capacity(256);
+
+    loop {
+        socket.ready(Interest::READABLE).await?;
+
+        match socket.try_read_buf(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(_n) => {
+                loop {
+                    if buffer.is_empty() {
+                        break;
+                    }
+
+                    match MemcachedCommand::parse(&buffer) {
+                        Ok((cmd, consumed)) => {
+                            write_buf.clear();
+                            let should_quit = cmd.execute(&*cache, &mut write_buf).await;
+                            buffer.advance(consumed);
+
+                            if !write_buf.is_empty() {
+                                write_all(&socket, &write_buf).await?;
+                            }
+
+                            if should_quit {
+                                return Ok(());
+                            }
+                        }
+                        Err(MemcachedParseError::Incomplete) => break,
+                        Err(MemcachedParseError::Invalid(msg)) => {
+                            PROTOCOL_ERRORS.increment();
+                            let error_msg = format!("ERROR {}\r\n", msg);
+                            let _ = write_all(&socket, error_msg.as_bytes()).await;
+                            buffer.clear();
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+// =============================================================================
+// Shared Utilities
+// =============================================================================
+
+async fn write_all(socket: &TcpStream, data: &[u8]) -> Result<(), std::io::Error> {
+    let mut written = 0;
+    while written < data.len() {
+        match socket.try_write(&data[written..]) {
+            Ok(n) => written += n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                socket.ready(Interest::WRITABLE).await?;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }

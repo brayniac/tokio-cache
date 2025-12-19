@@ -4,8 +4,12 @@
 # Works with both segcache-server and s3fifo-server.
 
 [server]
-# Address and port to listen on
+# Address and port to listen on for Redis protocol
 listen = "0.0.0.0:6379"
+
+# Address and port to listen on for Memcached protocol
+# Set to empty string to disable memcached protocol
+memcached_listen = "0.0.0.0:11211"
 
 # Address for Prometheus metrics endpoint
 metrics_listen = "0.0.0.0:9090"

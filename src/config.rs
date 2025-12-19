@@ -17,9 +17,14 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
-    /// Address to listen on (default: "0.0.0.0:6379")
+    /// Address to listen on for Redis protocol (default: "0.0.0.0:6379")
     #[serde(default = "default_listen")]
     pub listen: String,
+
+    /// Address to listen on for Memcached protocol (default: "0.0.0.0:11211")
+    /// Set to empty string to disable memcached protocol.
+    #[serde(default = "default_memcached_listen")]
+    pub memcached_listen: String,
 
     /// Address for metrics endpoint (default: "0.0.0.0:9090")
     #[serde(default = "default_metrics_listen")]
@@ -54,6 +59,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             listen: default_listen(),
+            memcached_listen: default_memcached_listen(),
             metrics_listen: default_metrics_listen(),
             threads: None,
             cpu_affinity: None,
@@ -67,6 +73,10 @@ impl Default for ServerConfig {
 
 fn default_listen() -> String {
     "0.0.0.0:6379".to_string()
+}
+
+fn default_memcached_listen() -> String {
+    "0.0.0.0:11211".to_string()
 }
 
 fn default_metrics_listen() -> String {
@@ -336,8 +346,12 @@ pub fn print_default_config(cache_type: &str) {
 # Copy and modify as needed for your deployment.
 
 [server]
-# Address and port to listen on
+# Address and port to listen on for Redis protocol
 listen = "0.0.0.0:6379"
+
+# Address and port to listen on for Memcached protocol
+# Set to empty string to disable memcached protocol
+memcached_listen = "0.0.0.0:11211"
 
 # Address for Prometheus metrics endpoint
 metrics_listen = "0.0.0.0:9090"
