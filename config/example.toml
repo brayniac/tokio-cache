@@ -1,0 +1,55 @@
+# tokio-cache example configuration
+#
+# This file demonstrates all available configuration options.
+# Works with both segcache-server and s3fifo-server.
+
+[server]
+# Address and port to listen on
+listen = "0.0.0.0:6379"
+
+# Address for Prometheus metrics endpoint
+metrics_listen = "0.0.0.0:9090"
+
+# Number of worker threads (default: number of CPUs)
+threads = 8
+
+# CPU cores to pin worker threads to (optional, Linux-style format)
+# This improves cache locality and reduces context switches.
+# Thread count is auto-derived from the number of CPUs in the list.
+#
+# Examples:
+#   "0-7"       - CPUs 0 through 7 (8 threads)
+#   "0,2,4,6"   - specific CPUs (4 threads)
+#   "0-7:2"     - CPUs 0,2,4,6 with stride 2 (4 threads)
+#   "0-3,8-11"  - two ranges (8 threads)
+#
+# cpu_affinity = "0-7"
+
+# TCP listen backlog size
+backlog = 4096
+
+# Socket buffer sizes
+recv_buffer_size = "64KB"
+send_buffer_size = "64KB"
+
+# Application read buffer size
+read_buffer_size = "64KB"
+
+[cache]
+# Total heap size for cache
+# Supports: B, KB/K, MB/M, GB/G, TB/T suffixes
+heap_size = "4GB"
+
+# Segment size - smaller segments allow finer-grained eviction
+# but increase metadata overhead. 1MB is a good default.
+segment_size = "1MB"
+
+# Hashtable power determines the number of buckets: 2^power
+#
+# Sizing guide:
+#   power 20 =  1M buckets
+#   power 22 =  4M buckets
+#   power 24 = 16M buckets
+#   power 26 = 64M buckets
+#
+hashtable_power = 26

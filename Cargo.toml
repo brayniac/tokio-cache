@@ -1,0 +1,34 @@
+[package]
+name = "tokio-cache"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-segcache = { git = "https://github.com/brayniac/async-segcache" }
+async-s3fifo = { git = "https://github.com/brayniac/async-s3fifo" }
+tokio = { version = "1", features = ["full"] }
+bytes = "1.10"
+clocksource = "0.8"
+socket2 = "0.5"
+itoa = "1.0"
+memchr = "2.7"
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+num_cpus = "1.16"
+metriken = "0.7"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"
+
+[[bin]]
+name = "segcache-server"
+path = "src/bin/segcache.rs"
+
+[[bin]]
+name = "s3fifo-server"
+path = "src/bin/s3fifo.rs"
